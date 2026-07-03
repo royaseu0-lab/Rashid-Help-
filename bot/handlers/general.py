@@ -1,8 +1,9 @@
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot import db
+from bot.config import OWNER_ID
 
 router = Router()
 
@@ -40,14 +41,33 @@ HELP_TEXT = """
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     if message.chat.type == "private":
-        await message.answer(
-            "أهلاً بك 👋 أنا <b>المساعد رشيد</b>، بوت حماية المجموعات.\n"
-            "أضفني إلى مجموعتك وارفعني مشرفًا لأبدأ الحماية.\n\n"
-            "أرسل /help لرؤية كل الأوامر."
-        )
+        if message.from_user and message.from_user.id == OWNER_ID:
+            # Owner sees the admin panel directly
+            count = await db.count_groups()
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚙️ الإعدادات", callback_data="ap:settings"),
+                 InlineKeyboardButton(text="📝 المحتوى", callback_data="ap:content")],
+                [InlineKeyboardButton(text="👥 المجموعات", callback_data="ap:groups"),
+                 InlineKeyboardButton(text="📢 بث رسالة", callback_data="ap:broadcast")],
+                [InlineKeyboardButton(text="🔧 النظام والدعم", callback_data="ap:system")],
+            ])
+            await message.answer(
+                f"👋 أهلاً <b>رشيد</b>!\n\n"
+                f"🤖 <b>المساعد رشيد</b> جاهز\n"
+                f"📊 المجموعات النشطة: <b>{count}</b>\n\n"
+                "اختر من لوحة التحكم:",
+                reply_markup=kb,
+            )
+        else:
+            await message.answer(
+                "👋 أهلاً بك!\n\n"
+                "أنا <b>المساعد رشيد</b>، بوت حماية المجموعات.\n"
+                "أضفني إلى مجموعتك وارفعني مشرفًا لأبدأ الحماية.\n\n"
+                "أرسل /help لرؤية كل الأوامر."
+            )
     else:
         await db.ensure_group(message.chat.id, message.chat.title or "")
-        await message.answer("👋 المساعد رشيد جاهز لحماية هذه المجموعة.")
+        await message.answer("👋 المساعد رشيد جاهز لحماية هذه المجموعة. 🛡")
 
 
 @router.message(Command("help"))
