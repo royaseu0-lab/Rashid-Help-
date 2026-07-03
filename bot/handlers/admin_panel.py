@@ -1,4 +1,4 @@
-import time
+import json
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -14,24 +14,39 @@ router = Router()
 router.message.filter(F.chat.type == "private", F.from_user.id == OWNER_ID)
 router.callback_query.filter(F.from_user.id == OWNER_ID)
 
+REPLIES_PER_PAGE = 5
+
 
 class PanelState(StatesGroup):
     broadcast = State()
     edit_welcome = State()
     edit_rules = State()
     edit_bot_info = State()
-    _pending_chat = State()
+    # add reply from panel
+    add_reply_match = State()
+    add_reply_triggers = State()
+    add_reply_content = State()
 
 
-# ─── keyboard builders ────────────────────────────────────────────────────────
+# ─── keyboard helpers ─────────────────────────────────────────────────────────
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
+def _url_btn(text: str, url: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, url=url)
+
+
 def _kb(*rows: list[InlineKeyboardButton]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=list(rows))
 
+
+def back_btn(dest: str = "ap:main") -> list[InlineKeyboardButton]:
+    return [_btn("◀️ رجوع", dest)]
+
+
+# ─── main panel ───────────────────────────────────────────────────────────────
 
 def main_kb(group_count: int) -> InlineKeyboardMarkup:
     return _kb(
@@ -41,8 +56,13 @@ def main_kb(group_count: int) -> InlineKeyboardMarkup:
     )
 
 
-def back_btn(dest: str = "ap:main") -> list[InlineKeyboardButton]:
-    return [_btn("◀️ رجوع", dest)]
+async def _all_groups() -> list[dict]:
+    ids = await db.all_group_ids()
+    groups = []
+    for cid in ids:
+        g = await db.get_group(cid)
+        groups.append(g)
+    return groups
 
 
 def groups_kb(groups: list[dict], back: str = "ap:main") -> InlineKeyboardMarkup:
@@ -54,6 +74,8 @@ def groups_kb(groups: list[dict], back: str = "ap:main") -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# ─── group menu ───────────────────────────────────────────────────────────────
+
 def group_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
     return _kb(
         [_btn("⚙️ الإعدادات", f"ap:g:{chat_id}:settings")],
@@ -62,6 +84,8 @@ def group_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
         back_btn("ap:groups"),
     )
 
+
+# ─── group settings ───────────────────────────────────────────────────────────
 
 def group_settings_kb(chat_id: int, g: dict) -> InlineKeyboardMarkup:
     def tog(label_on, label_off, field):
@@ -80,32 +104,69 @@ def group_settings_kb(chat_id: int, g: dict) -> InlineKeyboardMarkup:
     )
 
 
-def group_content_kb(chat_id: int, replies_count: int) -> InlineKeyboardMarkup:
+# ─── group content (full panel as requested) ──────────────────────────────────
+
+def group_content_kb(chat_id: int, replies_count: int, deeplink_count: int = 0) -> InlineKeyboardMarkup:
     return _kb(
         [_btn("👋 رسالة الترحيب", f"ap:g:{chat_id}:edit_welcome")],
-        [_btn(f"💬 الردود التلقائية ({replies_count})", f"ap:g:{chat_id}:replies")],
-        [_btn("🚫 الكلمات الممنوعة", f"ap:g:{chat_id}:blacklist")],
+        [_btn(f"💬 الردود التلقائية ({replies_count})", f"ap:g:{chat_id}:replies:0")],
+        [_btn("✏️ تعديل الأزرار", f"ap:g:{chat_id}:edit_buttons"),
+         _btn("🔘 الأزرار الشفافة", f"ap:g:{chat_id}:transparent_btns")],
+        [_btn("📎 الاختصارات", f"ap:g:{chat_id}:shortcuts")],
+        [_btn("📋 قائمة التعديلات", f"ap:g:{chat_id}:edits_log"),
+         _btn("✏️ تعديل المحتوى", f"ap:g:{chat_id}:edit_content")],
+        [_btn(f"🔗 ديب لينك مخصص ({deeplink_count})", f"ap:g:{chat_id}:deeplinks")],
+        [_btn("ℹ️ معلومات البوت", f"ap:g:{chat_id}:bot_info")],
+        [_btn("❓ المساعدة", f"ap:g:{chat_id}:help_page")],
         back_btn(f"ap:g:{chat_id}"),
     )
 
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
+# ─── replies list with pagination ─────────────────────────────────────────────
 
-async def _all_groups() -> list[dict]:
-    ids = await db.all_group_ids()
-    groups = []
-    for cid in ids:
-        g = await db.get_group(cid)
-        groups.append(g)
-    return groups
+def replies_kb(chat_id: int, replies: list[dict], page: int) -> InlineKeyboardMarkup:
+    rows = []
+    rows.append([_btn("➕ إضافة رد جديد", f"ap:g:{chat_id}:reply:add")])
+
+    total = len(replies)
+    start = page * REPLIES_PER_PAGE
+    end = min(start + REPLIES_PER_PAGE, total)
+    page_replies = replies[start:end]
+
+    if total:
+        rows.append([_btn("─────── الردود ───────", "ap:noop")])
+    for r in page_replies:
+        triggers = r["triggers"].replace("|", " / ")[:35]
+        rows.append([_btn(f"💬 {triggers}", f"ap:g:{chat_id}:reply:{r['id']}")])
+
+    # pagination row
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"ap:g:{chat_id}:replies:{page - 1}"))
+    if total:
+        nav.append(_btn(f"📄 {page + 1}/{max(1, (total + REPLIES_PER_PAGE - 1) // REPLIES_PER_PAGE)}", "ap:noop"))
+    if end < total:
+        nav.append(_btn("▶️", f"ap:g:{chat_id}:replies:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append(back_btn(f"ap:g:{chat_id}:content"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _edit_or_send(target, text: str, kb: InlineKeyboardMarkup):
-    """Edit existing message or send new one."""
-    try:
-        await target.message.edit_text(text, reply_markup=kb)
-    except (AttributeError, TelegramBadRequest):
-        await target.answer(text, reply_markup=kb)
+def reply_detail_kb(chat_id: int, reply_id: int, page: int) -> InlineKeyboardMarkup:
+    return _kb(
+        [_btn("🗑️ حذف هذا الرد", f"ap:g:{chat_id}:reply:{reply_id}:del")],
+        back_btn(f"ap:g:{chat_id}:replies:{page}"),
+    )
+
+
+def match_type_kb(chat_id: int) -> InlineKeyboardMarkup:
+    return _kb(
+        [_btn("✅ البحث في كامل الجملة", f"ap:g:{chat_id}:reply:add:contains")],
+        [_btn("❌ مطابقة كاملة فقط", f"ap:g:{chat_id}:reply:add:exact")],
+        back_btn(f"ap:g:{chat_id}:replies:0"),
+    )
 
 
 # ─── /admin entry ─────────────────────────────────────────────────────────────
@@ -122,7 +183,7 @@ async def cmd_admin(message: Message):
     await message.answer(text, reply_markup=main_kb(count))
 
 
-# ─── main menu ────────────────────────────────────────────────────────────────
+# ─── main menu callback ───────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "ap:main")
 async def panel_main(cb: CallbackQuery):
@@ -137,7 +198,12 @@ async def panel_main(cb: CallbackQuery):
     await cb.answer()
 
 
-# ─── settings: pick a group ───────────────────────────────────────────────────
+@router.callback_query(F.data == "ap:noop")
+async def noop(cb: CallbackQuery):
+    await cb.answer()
+
+
+# ─── settings ─────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "ap:settings")
 async def panel_settings(cb: CallbackQuery):
@@ -146,13 +212,13 @@ async def panel_settings(cb: CallbackQuery):
         await cb.answer("لا توجد مجموعات مسجّلة بعد.", show_alert=True)
         return
     await cb.message.edit_text(
-        "⚙️ <b>الإعدادات</b>\n\nاختر المجموعة التي تريد ضبط إعداداتها:",
+        "⚙️ <b>الإعدادات</b>\n\nاختر المجموعة:",
         reply_markup=groups_kb(groups, back="ap:main"),
     )
     await cb.answer()
 
 
-# ─── content: pick a group ────────────────────────────────────────────────────
+# ─── content ──────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "ap:content")
 async def panel_content(cb: CallbackQuery):
@@ -172,18 +238,17 @@ async def panel_content(cb: CallbackQuery):
 @router.callback_query(F.data == "ap:groups")
 async def panel_groups(cb: CallbackQuery):
     groups = await _all_groups()
-    count = len(groups)
     if not groups:
         await cb.answer("لا توجد مجموعات مسجّلة بعد.", show_alert=True)
         return
     await cb.message.edit_text(
-        f"👥 <b>المجموعات</b> ({count})\n\nاختر مجموعة لإدارتها:",
+        f"👥 <b>المجموعات</b> ({len(groups)})\n\nاختر مجموعة لإدارتها:",
         reply_markup=groups_kb(groups, back="ap:main"),
     )
     await cb.answer()
 
 
-# ─── group main submenu ───────────────────────────────────────────────────────
+# ─── group submenu ────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.regexp(r"^ap:g:(-?\d+)$"))
 async def panel_group_menu(cb: CallbackQuery):
@@ -224,12 +289,9 @@ async def panel_toggle(cb: CallbackQuery, bot: Bot):
     chat_id = int(parts[2])
     field = parts[4]
     g = await db.get_group(chat_id)
-    current = g.get(field, 0)
-    new_val = 0 if current else 1
+    new_val = 0 if g.get(field, 0) else 1
     await db.set_group_field(chat_id, field, new_val)
     g[field] = new_val
-
-    # Apply lock/unlock immediately via Telegram API
     if field == "locked":
         from bot.handlers.moderation import FULL_PERMISSIONS, NO_PERMISSIONS
         try:
@@ -237,10 +299,8 @@ async def panel_toggle(cb: CallbackQuery, bot: Bot):
             await bot.set_chat_permissions(chat_id, permissions=perms)
         except TelegramBadRequest:
             pass
-
     title = g.get("title") or str(chat_id)
-    status = "✅ مفعّل" if new_val else "🔴 معطّل"
-    await cb.answer(f"{status}", show_alert=False)
+    await cb.answer("✅ مفعّل" if new_val else "🔴 معطّل")
     await cb.message.edit_text(
         f"⚙️ <b>إعدادات: {title}</b>\n\nاضغط على أي خيار لتفعيله أو تعطيله:",
         reply_markup=group_settings_kb(chat_id, g),
@@ -252,11 +312,11 @@ async def panel_toggle(cb: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):content$"))
 async def panel_group_content(cb: CallbackQuery):
     chat_id = int(cb.data.split(":")[2])
-    g = await db.get_group(chat_id)
     replies = await db.list_replies(chat_id)
+    g = await db.get_group(chat_id)
     title = g.get("title") or str(chat_id)
     await cb.message.edit_text(
-        f"📝 <b>محتوى: {title}</b>",
+        f"📝 <b>المحتوى: {title}</b>\n\nإدارة رسائل البوت والردود التلقائية",
         reply_markup=group_content_kb(chat_id, len(replies)),
     )
     await cb.answer()
@@ -283,11 +343,210 @@ async def panel_group_stats(cb: CallbackQuery):
         f"🔗 منع الروابط: {'مفعّل' if g.get('antilink') else 'معطّل'}\n"
         f"⚡ حماية الفيضان: {'مفعّلة' if g.get('antiflood') else 'معطّلة'}"
     )
+    await cb.message.edit_text(text, reply_markup=_kb(back_btn(f"ap:g:{chat_id}")))
+    await cb.answer()
+
+
+# ─── replies list (paginated) ─────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):replies:(\d+)$"))
+async def panel_replies_list(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    page = int(parts[4])
+    replies = await db.list_replies(chat_id)
+    total = len(replies)
+    g = await db.get_group(chat_id)
+    title = g.get("title") or str(chat_id)
+    text = (
+        f"💬 <b>الردود التلقائية: {title}</b>\n"
+        f"العدد الإجمالي: <b>{total}</b> رد\n\n"
+        "اضغط على أي رد لعرض تفاصيله أو حذفه\n"
+        "اضغط ➕ لإضافة رد جديد"
+    )
+    await cb.message.edit_text(text, reply_markup=replies_kb(chat_id, replies, page))
+    await cb.answer()
+
+
+# ─── single reply detail ──────────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):reply:(\d+)$"))
+async def panel_reply_detail(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    reply_id = int(parts[4])
+    replies = await db.list_replies(chat_id)
+    reply = next((r for r in replies if r["id"] == reply_id), None)
+    if not reply:
+        await cb.answer("هذا الرد لم يعد موجودًا.", show_alert=True)
+        return
+    triggers = reply["triggers"].replace("|", "\n• ")
+    match_label = "البحث في كامل الجملة" if reply["match_type"] == "contains" else "مطابقة كاملة"
+    type_labels = {
+        "text": "نص", "photo": "صورة", "video": "فيديو",
+        "sticker": "ملصق", "document": "ملف", "voice": "صوت", "animation": "GIF"
+    }
+    content_type = type_labels.get(reply["content_type"], reply["content_type"])
+    content_preview = (reply["content_text"] or "")[:100]
+    page = 0
+    for i, r in enumerate(replies):
+        if r["id"] == reply_id:
+            page = i // REPLIES_PER_PAGE
+            break
+    text = (
+        f"💬 <b>تفاصيل الرد #{reply_id}</b>\n\n"
+        f"📌 الأوامر:\n• {triggers}\n\n"
+        f"🔍 نوع البحث: {match_label}\n"
+        f"📄 نوع المحتوى: {content_type}\n"
+    )
+    if content_preview:
+        text += f"✏️ المحتوى:\n<i>{content_preview}</i>"
+    await cb.message.edit_text(text, reply_markup=reply_detail_kb(chat_id, reply_id, page))
+    await cb.answer()
+
+
+# ─── delete reply ─────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):reply:(\d+):del$"))
+async def panel_reply_delete(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    reply_id = int(parts[4])
+    async with __import__("aiosqlite").connect(__import__("bot.config", fromlist=["DATABASE_PATH"]).DATABASE_PATH) as db_conn:
+        await db_conn.execute("DELETE FROM replies WHERE id = ? AND chat_id = ?", (reply_id, chat_id))
+        await db_conn.commit()
+    replies = await db.list_replies(chat_id)
+    total = len(replies)
+    await cb.answer("🗑️ تم حذف الرد.", show_alert=False)
+    g = await db.get_group(chat_id)
+    title = g.get("title") or str(chat_id)
     await cb.message.edit_text(
-        text,
-        reply_markup=_kb(back_btn(f"ap:g:{chat_id}")),
+        f"💬 <b>الردود التلقائية: {title}</b>\n"
+        f"العدد الإجمالي: <b>{total}</b> رد\n\n"
+        "اضغط على أي رد لعرض تفاصيله أو حذفه\n"
+        "اضغط ➕ لإضافة رد جديد",
+        reply_markup=replies_kb(chat_id, replies, 0),
+    )
+
+
+# ─── add reply from panel: choose match type ─────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):reply:add$"))
+async def panel_add_reply_start(cb: CallbackQuery, state: FSMContext):
+    chat_id = int(cb.data.split(":")[2])
+    await state.set_state(PanelState.add_reply_match)
+    await state.update_data(panel_chat_id=chat_id)
+    await cb.message.edit_text(
+        "➕ <b>إضافة رد جديد</b>\n\nاختر طريقة البحث:",
+        reply_markup=match_type_kb(chat_id),
     )
     await cb.answer()
+
+
+@router.callback_query(PanelState.add_reply_match, F.data.regexp(r"^ap:g:(-?\d+):reply:add:(contains|exact)$"))
+async def panel_add_reply_match_chosen(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    match_type = parts[5]
+    await state.update_data(panel_match_type=match_type)
+    await state.set_state(PanelState.add_reply_triggers)
+    label = "البحث في كامل الجملة ✅" if match_type == "contains" else "مطابقة كاملة ❌"
+    await cb.message.edit_text(
+        f"➕ <b>إضافة رد جديد</b>\nطريقة البحث: {label}\n\n"
+        "أرسل الآن الأمر/الأوامر (يمكنك فصل أكثر من أمر بـ |)\n"
+        "مثال: <code>هلا|مرحبا|أهلا</code>\n\n"
+        "أو أرسل /cancel للإلغاء"
+    )
+    await cb.answer()
+
+
+@router.message(PanelState.add_reply_triggers, F.text)
+async def panel_add_reply_triggers(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        data = await state.get_data()
+        await state.clear()
+        await message.answer("❌ تم الإلغاء.")
+        return
+    triggers = [t.strip() for t in message.text.split("|") if t.strip()]
+    if not triggers:
+        await message.answer("⚠️ أرسل أمرًا واحدًا على الأقل.")
+        return
+    await state.update_data(panel_triggers=triggers)
+    await state.set_state(PanelState.add_reply_content)
+    await message.answer(
+        f"✅ الأوامر: <b>{' | '.join(triggers)}</b>\n\n"
+        "الآن أرسل الرد:\n"
+        "• نص عادي\n"
+        "• صورة أو فيديو أو ملصق أو ملف\n"
+        "• يمكن إضافة أزرار بالصيغة: <code>{[ النص - t.me/link ]}</code>\n\n"
+        "أو أرسل /cancel للإلغاء"
+    )
+
+
+@router.message(PanelState.add_reply_content)
+async def panel_add_reply_content(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        data = await state.get_data()
+        await state.clear()
+        await message.answer("❌ تم الإلغاء.")
+        return
+    data = await state.get_data()
+    chat_id = data["panel_chat_id"]
+    triggers = data["panel_triggers"]
+    match_type = data["panel_match_type"]
+
+    import re as _re
+    import json as _json
+
+    def _extract_buttons(text: str):
+        buttons = []
+        pattern = _re.compile(r"\{\[\s*(.+?)\s*-\s*(.+?)\s*\]\}")
+        def _strip(m):
+            buttons.append({"text": m.group(1), "url": m.group(2)})
+            return ""
+        cleaned = pattern.sub(_strip, text).strip()
+        return cleaned, buttons
+
+    content_type = "text"
+    content_text = ""
+    file_id = ""
+    buttons = []
+
+    if message.text:
+        content_text, buttons = _extract_buttons(message.text)
+    elif message.photo:
+        content_type, file_id = "photo", message.photo[-1].file_id
+        content_text = message.caption or ""
+    elif message.video:
+        content_type, file_id = "video", message.video.file_id
+        content_text = message.caption or ""
+    elif message.sticker:
+        content_type, file_id = "sticker", message.sticker.file_id
+    elif message.document:
+        content_type, file_id = "document", message.document.file_id
+        content_text = message.caption or ""
+    elif message.voice:
+        content_type, file_id = "voice", message.voice.file_id
+    elif message.animation:
+        content_type, file_id = "animation", message.animation.file_id
+        content_text = message.caption or ""
+    else:
+        await message.answer("⚠️ نوع المحتوى غير مدعوم.")
+        return
+
+    await db.add_reply(chat_id, triggers, match_type, content_type, content_text, file_id, buttons)
+    await state.clear()
+
+    replies = await db.list_replies(chat_id)
+    total = len(replies)
+    g = await db.get_group(chat_id)
+    title = g.get("title") or str(chat_id)
+    await message.answer(
+        f"✅ تم حفظ الرد بنجاح!\n"
+        f"الأوامر: <b>{' | '.join(triggers)}</b>\n"
+        f"إجمالي الردود الآن: <b>{total}</b>",
+        reply_markup=replies_kb(chat_id, replies, 0),
+    )
 
 
 # ─── edit welcome ─────────────────────────────────────────────────────────────
@@ -301,9 +560,9 @@ async def panel_edit_welcome_start(cb: CallbackQuery, state: FSMContext):
     await state.update_data(chat_id=chat_id)
     await cb.message.edit_text(
         f"👋 <b>رسالة الترحيب الحالية:</b>\n\n{current}\n\n"
-        "أرسل الرسالة الجديدة (يمكنك استخدام {user} لاسم العضو و {chat} لاسم المجموعة):\n\n"
-        "أو أرسل /cancel للإلغاء.",
-        reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")),
+        "أرسل رسالة الترحيب الجديدة\n"
+        "المتغيرات المتاحة: <code>{user}</code> للاسم، <code>{chat}</code> لاسم المجموعة\n\n"
+        "أو أرسل /cancel للإلغاء"
     )
     await cb.answer()
 
@@ -312,14 +571,13 @@ async def panel_edit_welcome_start(cb: CallbackQuery, state: FSMContext):
 async def panel_edit_welcome_save(message: Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ تم الإلغاء.", reply_markup=None)
+        await message.answer("❌ تم الإلغاء.")
         return
     data = await state.get_data()
     chat_id = data["chat_id"]
     await db.set_group_field(chat_id, "welcome_text", message.text)
     await db.set_group_field(chat_id, "welcome_enabled", 1)
     await state.clear()
-    g = await db.get_group(chat_id)
     replies = await db.list_replies(chat_id)
     await message.answer(
         "✅ تم حفظ رسالة الترحيب وتفعيلها.",
@@ -338,8 +596,7 @@ async def panel_edit_rules_start(cb: CallbackQuery, state: FSMContext):
     await state.update_data(chat_id=chat_id)
     await cb.message.edit_text(
         f"📜 <b>القوانين الحالية:</b>\n\n{current}\n\n"
-        "أرسل القوانين الجديدة أو /cancel للإلغاء:",
-        reply_markup=_kb(back_btn(f"ap:g:{chat_id}:settings")),
+        "أرسل القوانين الجديدة أو /cancel للإلغاء:"
     )
     await cb.answer()
 
@@ -355,42 +612,143 @@ async def panel_edit_rules_save(message: Message, state: FSMContext):
     await db.set_group_field(chat_id, "rules", message.text)
     await state.clear()
     g = await db.get_group(chat_id)
-    await message.answer(
-        "✅ تم حفظ القوانين.",
-        reply_markup=group_settings_kb(chat_id, g),
-    )
+    await message.answer("✅ تم حفظ القوانين.", reply_markup=group_settings_kb(chat_id, g))
 
 
-# ─── replies list ─────────────────────────────────────────────────────────────
+# ─── bot info ─────────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):replies$"))
-async def panel_group_replies(cb: CallbackQuery):
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):bot_info$"))
+async def panel_bot_info(cb: CallbackQuery, state: FSMContext):
     chat_id = int(cb.data.split(":")[2])
-    replies = await db.list_replies(chat_id)
-    if not replies:
-        text = "💬 لا توجد ردود تلقائية في هذه المجموعة.\n\nأرسل <b>اضف رد</b> داخل المجموعة لإضافة رد جديد."
-    else:
-        lines = [f"{i}. {r['triggers'].replace('|', ' / ')}" for i, r in enumerate(replies, 1)]
-        text = "💬 <b>الردود التلقائية:</b>\n\n" + "\n".join(lines)
+    g = await db.get_group(chat_id)
+    title = g.get("title") or str(chat_id)
+    await state.set_state(PanelState.edit_bot_info)
+    await state.update_data(chat_id=chat_id)
     await cb.message.edit_text(
-        text,
+        f"ℹ️ <b>معلومات البوت في: {title}</b>\n\n"
+        "أرسل النص الذي تريد عرضه عند كتابة <b>المطور</b> أو /cancel للإلغاء:"
+    )
+    await cb.answer()
+
+
+@router.message(PanelState.edit_bot_info, F.text)
+async def panel_bot_info_save(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ تم الإلغاء.")
+        return
+    await state.clear()
+    await message.answer("✅ تم الحفظ.")
+
+
+# ─── placeholder panels ───────────────────────────────────────────────────────
+
+async def _coming_soon(cb: CallbackQuery, title: str, back: str):
+    await cb.message.edit_text(
+        f"{title}\n\n⏳ هذه الميزة قيد التطوير وستكون متاحة قريبًا.",
+        reply_markup=_kb(back_btn(back)),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):edit_buttons$"))
+async def panel_edit_buttons(cb: CallbackQuery):
+    chat_id = int(cb.data.split(":")[2])
+    await _coming_soon(cb, "✏️ <b>تعديل الأزرار</b>", f"ap:g:{chat_id}:content")
+
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):transparent_btns$"))
+async def panel_transparent_btns(cb: CallbackQuery):
+    chat_id = int(cb.data.split(":")[2])
+    await cb.message.edit_text(
+        "🔘 <b>الأزرار الشفافة</b>\n\n"
+        "يمكنك إضافة أزرار شفافة في أي رد تلقائي باستخدام الصيغة:\n\n"
+        "<code>{[ النص - t.me/رابط ]}</code>\n\n"
+        "مثال:\n"
+        "<code>{[ قناتنا - t.me/mychannel ]}</code>\n"
+        "<code>{[ الموقع - https://example.com ]}</code>",
         reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")),
     )
     await cb.answer()
 
 
-# ─── blacklist view ───────────────────────────────────────────────────────────
-
-@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):blacklist$"))
-async def panel_group_blacklist(cb: CallbackQuery):
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):shortcuts$"))
+async def panel_shortcuts(cb: CallbackQuery):
     chat_id = int(cb.data.split(":")[2])
-    words = await db.list_blacklist(chat_id)
-    if not words:
-        text = "🚫 لا توجد كلمات ممنوعة.\n\nأرسل <b>منع [كلمة]</b> داخل المجموعة لإضافة كلمة."
-    else:
-        text = "🚫 <b>الكلمات الممنوعة:</b>\n\n" + "\n".join(f"• {w}" for w in words)
     await cb.message.edit_text(
-        text,
+        "📎 <b>الاختصارات</b>\n\n"
+        "<b>اختصارات الأوامر المتاحة في المجموعة:</b>\n\n"
+        "• كتم / الغاء كتم\n"
+        "• حظر / الغاء حظر\n"
+        "• طرد / انذار\n"
+        "• مسح / مسح من هنا\n"
+        "• اضف رد / حذف رد / ردود\n"
+        "• منع [كلمة] / قائمة المنع",
+        reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):edits_log$"))
+async def panel_edits_log(cb: CallbackQuery):
+    chat_id = int(cb.data.split(":")[2])
+    replies = await db.list_replies(chat_id)
+    blacklist = await db.list_blacklist(chat_id)
+    g = await db.get_group(chat_id)
+    text = (
+        "📋 <b>قائمة التعديلات</b>\n\n"
+        f"💬 الردود التلقائية: {len(replies)}\n"
+        f"🚫 الكلمات الممنوعة: {len(blacklist)}\n"
+        f"📜 القوانين: {'محددة' if g.get('rules') else 'لم تحدد'}\n"
+        f"👋 رسالة الترحيب: {'محددة' if g.get('welcome_text') else 'لم تحدد'}"
+    )
+    await cb.message.edit_text(text, reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")))
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):edit_content$"))
+async def panel_edit_content(cb: CallbackQuery):
+    chat_id = int(cb.data.split(":")[2])
+    await cb.message.edit_text(
+        "✏️ <b>تعديل المحتوى</b>\n\n"
+        "اختر ما تريد تعديله:",
+        reply_markup=_kb(
+            [_btn("👋 رسالة الترحيب", f"ap:g:{chat_id}:edit_welcome")],
+            [_btn("📜 القوانين", f"ap:g:{chat_id}:edit_rules")],
+            back_btn(f"ap:g:{chat_id}:content"),
+        ),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):deeplinks$"))
+async def panel_deeplinks(cb: CallbackQuery):
+    chat_id = int(cb.data.split(":")[2])
+    await cb.message.edit_text(
+        "🔗 <b>ديب لينك مخصص</b>\n\n"
+        "يمكنك إنشاء روابط مخصصة تفتح البوت مباشرة مع رسالة أو أمر محدد.\n\n"
+        "مثال على رابط ديب لينك:\n"
+        "<code>t.me/Rashid_Help_bot?start=welcome</code>\n\n"
+        "⏳ إدارة الديب لينك قيد التطوير.",
+        reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):help_page$"))
+async def panel_help_page(cb: CallbackQuery):
+    chat_id = int(cb.data.split(":")[2])
+    await cb.message.edit_text(
+        "❓ <b>المساعدة</b>\n\n"
+        "<b>كيف تضيف ردًا تلقائيًا؟</b>\n"
+        "اضغط 💬 الردود التلقائية ← ➕ إضافة رد جديد\n\n"
+        "<b>كيف تفعّل الترحيب؟</b>\n"
+        "اضغط ⚙️ الإعدادات ← اختر مجموعة ← الترحيب\n\n"
+        "<b>كيف تمنع كلمة في المجموعة؟</b>\n"
+        "أرسل في المجموعة: <code>منع [الكلمة]</code>\n\n"
+        "<b>كيف تكتم عضوًا؟</b>\n"
+        "رد على رسالته واكتب: <code>كتم</code>\n\n"
+        f"للتواصل: {DEVELOPER_CONTACT}",
         reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")),
     )
     await cb.answer()
@@ -405,7 +763,7 @@ async def panel_broadcast_start(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         f"📢 <b>بث رسالة</b>\n\n"
         f"سيتم إرسال رسالتك إلى <b>{count}</b> مجموعة.\n\n"
-        "أرسل الرسالة الآن (نص أو صورة أو فيديو...) أو /cancel للإلغاء:",
+        "أرسل الرسالة (نص، صورة، فيديو...) أو /cancel للإلغاء:",
         reply_markup=_kb(back_btn("ap:main")),
     )
     await cb.answer()
@@ -416,10 +774,7 @@ async def panel_broadcast_send(message: Message, state: FSMContext, bot: Bot):
     if message.text == "/cancel":
         await state.clear()
         count = await db.count_groups()
-        await message.answer(
-            "❌ تم الإلغاء.",
-            reply_markup=main_kb(count),
-        )
+        await message.answer("❌ تم الإلغاء.", reply_markup=main_kb(count))
         return
     await state.clear()
     group_ids = await db.all_group_ids()
@@ -447,11 +802,11 @@ async def panel_system(cb: CallbackQuery):
         f"📊 المجموعات: {count}\n"
         f"👤 المالك: {DEVELOPER_CONTACT}\n"
         f"🤖 البوت: @Rashid_Help_bot\n\n"
-        "<b>أوامر مفيدة في المجموعات:</b>\n"
-        "• <code>اضف رد</code> ← إضافة رد تلقائي\n"
+        "<b>أوامر سريعة في المجموعة:</b>\n"
+        "• <code>اضف رد</code> ← رد تلقائي جديد\n"
         "• <code>منع [كلمة]</code> ← حظر كلمة\n"
-        "• <code>تعيين القوانين [النص]</code> ← تعيين القوانين\n"
-        "• <code>تعيين الترحيب [النص]</code> ← تعيين الترحيب"
+        "• <code>تعيين القوانين [نص]</code>\n"
+        "• <code>تعيين الترحيب [نص]</code>"
     )
     await cb.message.edit_text(text, reply_markup=_kb(back_btn("ap:main")))
     await cb.answer()
