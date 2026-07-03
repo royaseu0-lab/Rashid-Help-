@@ -39,7 +39,7 @@ FULL_PERMISSIONS = ChatPermissions(
 )
 
 
-@router.message(F.text.regexp(r"^(كتم|/كتم)(\s|$)"), IsGroupAdmin())
+@router.message(F.text.regexp(r"^(كتم|قيد|/كتم|/قيد)(\s|$)"), IsGroupAdmin())
 async def cmd_mute(message: Message, bot: Bot):
     target, rest = await split_target_and_rest(message, bot, strip_command(message.text))
     if not target:
@@ -53,14 +53,23 @@ async def cmd_mute(message: Message, bot: Bot):
             until_date=until or None,
         )
     except TelegramBadRequest as e:
-        await message.reply(f"❌ تعذر كتم العضو: {e.message}")
+        await message.reply(f"❌ تعذر تقييد العضو: {e.message}")
         return
     await db.record_mute(message.chat.id, target.id, until, reason="")
     duration_text = f" لمدة {format_remaining(int(time.time()) + seconds)}" if seconds else " بشكل دائم"
-    await message.reply(f"🔇 تم كتم {mention(target)}{duration_text}.")
+    await message.answer(f"🔇 تم تقييد {mention(target)}{duration_text}.")
+    if message.reply_to_message:
+        try:
+            await message.reply_to_message.delete()
+        except TelegramBadRequest:
+            pass
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
 
 
-@router.message(F.text.regexp(r"^(الغاء كتم|إلغاء كتم|الغاءالكتم|/unmute)(\s|$)"), IsGroupAdmin())
+@router.message(F.text.regexp(r"^(الغاء كتم|إلغاء كتم|الغاءالكتم|فك قيد|/unmute)(\s|$)"), IsGroupAdmin())
 async def cmd_unmute(message: Message, bot: Bot):
     target, _ = await split_target_and_rest(message, bot, strip_command(message.text))
     if not target:
@@ -72,7 +81,7 @@ async def cmd_unmute(message: Message, bot: Bot):
         await message.reply(f"❌ تعذر إلغاء الكتم: {e.message}")
         return
     await db.remove_mute_record(message.chat.id, target.id)
-    await message.reply(f"🔊 تم إلغاء الكتم عن {mention(target)}.")
+    await message.reply(f"🔊 تم فك القيد عن {mention(target)}.")
 
 
 @router.message(F.text.regexp(r"^(حظر|/حظر|/ban)(\s|$)"), IsGroupAdmin())
@@ -87,10 +96,19 @@ async def cmd_ban(message: Message, bot: Bot):
         await message.reply(f"❌ تعذر حظر العضو: {e.message}")
         return
     await db.record_ban(message.chat.id, target.id)
-    await message.reply(f"🚫 تم حظر {mention(target)}.")
+    await message.answer(f"🚫 تم حظر {mention(target)}.")
+    if message.reply_to_message:
+        try:
+            await message.reply_to_message.delete()
+        except TelegramBadRequest:
+            pass
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
 
 
-@router.message(F.text.regexp(r"^(الغاء حظر|إلغاء حظر|الغاءالحظر|/unban)(\s|$)"), IsGroupAdmin())
+@router.message(F.text.regexp(r"^(الغاء حظر|إلغاء حظر|الغاءالحظر|فك حظر|/unban)(\s|$)"), IsGroupAdmin())
 async def cmd_unban(message: Message, bot: Bot):
     target, _ = await split_target_and_rest(message, bot, strip_command(message.text))
     if not target:
@@ -360,6 +378,42 @@ async def cmd_set_rules(message: Message):
     rules_text = strip_command(message.text)
     await db.set_group_field(message.chat.id, "rules", rules_text)
     await message.reply("✅ تم تحديث قوانين المجموعة.")
+
+
+@router.message(F.text.regexp(r"^(مسح المحظورين)$"), IsGroupAdmin())
+async def cmd_clear_all_banned(message: Message, bot: Bot):
+    rows = await db.list_banned(message.chat.id)
+    if not rows:
+        await message.reply("لا يوجد أعضاء محظورون مسجلون.")
+        return
+    done, failed = 0, 0
+    for user_id, *_ in rows:
+        try:
+            await bot.unban_chat_member(message.chat.id, user_id, only_if_banned=True)
+            done += 1
+        except TelegramBadRequest:
+            failed += 1
+        await db.remove_ban_record(message.chat.id, user_id)
+    suffix = f"، فشل: {failed}" if failed else ""
+    await message.reply(f"✅ تم فك حظر {done} عضو{suffix}.")
+
+
+@router.message(F.text.regexp(r"^(مسح المقيدين)$"), IsGroupAdmin())
+async def cmd_clear_all_muted(message: Message, bot: Bot):
+    rows = await db.list_muted(message.chat.id)
+    if not rows:
+        await message.reply("لا يوجد أعضاء مقيدون مسجلون.")
+        return
+    done, failed = 0, 0
+    for user_id, *_ in rows:
+        try:
+            await bot.restrict_chat_member(message.chat.id, user_id, permissions=FULL_PERMISSIONS)
+            done += 1
+        except TelegramBadRequest:
+            failed += 1
+        await db.remove_mute_record(message.chat.id, user_id)
+    suffix = f"، فشل: {failed}" if failed else ""
+    await message.reply(f"✅ تم فك قيد {done} عضو{suffix}.")
 
 
 @router.message(F.text.regexp(r"^(المطور|/المطور)$"))
