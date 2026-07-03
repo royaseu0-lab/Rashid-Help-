@@ -31,6 +31,8 @@ BOT_TOKEN = _parse_token(os.getenv("BOT_TOKEN", ""))
 OWNER_ID = _parse_owner_id(os.getenv("OWNER_ID", "0"))
 DEVELOPER_CONTACT = os.getenv("DEVELOPER_CONTACT", "@Rashid_1Help")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "rashid_help.db")
+SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "")
+SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET", "")
 
 if not BOT_TOKEN:
     raise RuntimeError(

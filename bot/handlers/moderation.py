@@ -380,6 +380,26 @@ async def cmd_set_rules(message: Message):
     await message.reply("✅ تم تحديث قوانين المجموعة.")
 
 
+@router.message(F.text == "مسح!", IsGroupAdmin())
+async def cmd_purge_user_msgs(message: Message, bot: Bot):
+    """Reply to any message from a user → deletes all their recent messages and unbans immediately."""
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply("⚠️ رد على رسالة العضو لمسح رسائله الأخيرة.")
+        return
+    target = message.reply_to_message.from_user
+    try:
+        await bot.ban_chat_member(message.chat.id, target.id, revoke_messages=True)
+        await bot.unban_chat_member(message.chat.id, target.id, only_if_banned=True)
+    except TelegramBadRequest as e:
+        await message.reply(f"❌ تعذر مسح رسائل {mention(target)}: {e.message}")
+        return
+    await message.answer(f"🗑️ تم مسح رسائل {mention(target)} الأخيرة.")
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+
 @router.message(F.text.regexp(r"^(مسح المحظورين)$"), IsGroupAdmin())
 async def cmd_clear_all_banned(message: Message, bot: Bot):
     rows = await db.list_banned(message.chat.id)

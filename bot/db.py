@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS groups (
     antilink INTEGER DEFAULT 0,
     antiflood INTEGER DEFAULT 1,
     flood_limit INTEGER DEFAULT {flood_limit},
-    flood_seconds INTEGER DEFAULT {flood_seconds}
+    flood_seconds INTEGER DEFAULT {flood_seconds},
+    nsfw_ban INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS warns (
@@ -61,9 +62,19 @@ CREATE TABLE IF NOT EXISTS replies (
 """.format(flood_limit=DEFAULT_FLOOD_LIMIT, flood_seconds=DEFAULT_FLOOD_SECONDS)
 
 
+_MIGRATIONS = [
+    "ALTER TABLE groups ADD COLUMN nsfw_ban INTEGER DEFAULT 0",
+]
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.executescript(_SCHEMA)
+        for migration in _MIGRATIONS:
+            try:
+                await db.execute(migration)
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -91,15 +102,9 @@ async def get_group(chat_id: int) -> dict:
 
 async def set_group_field(chat_id: int, field: str, value) -> None:
     allowed = {
-        "locked",
-        "rules",
-        "welcome_enabled",
-        "welcome_text",
-        "antilink",
-        "antiflood",
-        "flood_limit",
-        "flood_seconds",
-        "title",
+        "locked", "rules", "welcome_enabled", "welcome_text",
+        "antilink", "antiflood", "flood_limit", "flood_seconds",
+        "title", "nsfw_ban",
     }
     if field not in allowed:
         raise ValueError(f"Field not allowed: {field}")
