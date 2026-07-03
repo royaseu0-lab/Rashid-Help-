@@ -1,7 +1,7 @@
-from . import antispam, general, moderation, owner_panel, replies, welcome
+from . import admin_panel, antispam, general, moderation, replies, welcome
 
 routers = [
-    owner_panel.router,
+    admin_panel.router,
     general.router,
     moderation.router,
     welcome.router,
