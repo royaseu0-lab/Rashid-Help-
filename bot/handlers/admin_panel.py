@@ -660,14 +660,25 @@ async def panel_edit_buttons(cb: CallbackQuery):
 @router.callback_query(F.data.regexp(r"^ap:g:(-?\d+):transparent_btns$"))
 async def panel_transparent_btns(cb: CallbackQuery):
     chat_id = int(cb.data.split(":")[2])
+    demo_kb = InlineKeyboardMarkup(inline_keyboard=[
+        # live demo buttons so owner sees exactly how they render
+        [InlineKeyboardButton(text="📢 قناتنا", url="https://t.me/Rashid_1Help"),
+         InlineKeyboardButton(text="🌐 الموقع", url="https://t.me/Rashid_1Help")],
+        [InlineKeyboardButton(text="✉️ تواصل معنا", url="https://t.me/Rashid_1Help")],
+        # action buttons
+        [_btn("➕ إضافة رد مع أزرار", f"ap:g:{chat_id}:reply:add")],
+        back_btn(f"ap:g:{chat_id}:content"),
+    ])
     await cb.message.edit_text(
         "🔘 <b>الأزرار الشفافة</b>\n\n"
-        "يمكنك إضافة أزرار شفافة في أي رد تلقائي باستخدام الصيغة:\n\n"
-        "<code>{[ النص - t.me/رابط ]}</code>\n\n"
-        "مثال:\n"
-        "<code>{[ قناتنا - t.me/mychannel ]}</code>\n"
-        "<code>{[ الموقع - https://example.com ]}</code>",
-        reply_markup=_kb(back_btn(f"ap:g:{chat_id}:content")),
+        "أضف أزرار URL في ردودك التلقائية بالصيغة:\n"
+        "<code>{[ النص - الرابط ]}</code>\n\n"
+        "<b>مثال كامل:</b>\n"
+        "<code>أهلاً! تابعنا على:\n"
+        "{[ قناتنا - t.me/mychannel ]}\n"
+        "{[ الموقع - https://example.com ]}</code>\n\n"
+        "⬇️ <b>هكذا تظهر الأزرار في الرسالة الفعلية:</b>",
+        reply_markup=demo_kb,
     )
     await cb.answer()
 
